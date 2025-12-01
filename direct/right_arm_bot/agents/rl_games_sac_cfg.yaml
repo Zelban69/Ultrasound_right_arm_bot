@@ -1,0 +1,70 @@
+params:
+  seed: 42
+  
+  # --- Algorithm ---
+  algo:
+    name: sac
+
+  # --- Neural Network Architecture ---
+  model:
+    name: soft_actor_critic
+  
+  network:
+    name: soft_actor_critic
+    separate: True
+    
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True # Required for this implementation
+        
+    # MLP (Actor and Critic)
+    mlp:
+      units: 
+      activation: elu
+      d2rl: False
+      initializer:
+        name: default
+        
+    # Critical for stability
+    log_std_bounds: [-5, 2]
+
+  # --- Training Configuration ---
+  config:
+    name: RightArmBot_SAC
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    
+    # Normalization (Essential for physics tasks)
+    normalize_input: True
+    normalize_value: True
+    reward_shaper:
+      scale_value: 1.0
+    
+    # Training Loop
+    max_epochs: 10000
+    num_steps_per_episode: 1
+    save_best_after: 100
+    save_frequency: 100
+    
+    # SAC Hyperparameters
+    gamma: 0.99
+    init_alpha: 1.0
+    alpha_lr: 0.005
+    actor_lr: 0.0003
+    critic_lr: 0.0003
+    critic_tau: 0.005
+    batch_size: 4096        # Larger batch size for vectorized envs
+    learnable_temperature: True
+    replay_buffer_size: 1000000
+    
+    # MUST MATCH YOUR ENV CFG 'num_envs' EXACTLY
+    num_actors: 4096

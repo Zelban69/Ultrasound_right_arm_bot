@@ -33,13 +33,13 @@ class RightArmBotEnvCfg(DirectRLEnvCfg):
     action_space = 10
     # A common observation space is (joint_pos (10), joint_vel (10))
     # This will depend on what you define in your env.py file.
-    observation_space = 20
+    observation_space = 23
     state_space = 20
 
     # --- 4. SIMULATION SETTINGS ---
     # (Applied from your config)
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 200,
+        dt=1 / 400,
         render_interval=1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -83,13 +83,20 @@ class RightArmBotEnvCfg(DirectRLEnvCfg):
     # rewards in your 'right_arm_bot_env.py' file.
     
     # rewarding proximity to a goal
-    reaching_goal_reward_scale: float = 2.5
+    reaching_goal_reward_scale: float = 10.0
     
-    # penalizing large actions to encourage smoothness
-    action_rate_reward_scale: float = -1.0
+    # ACTION RATE: Small penalty
+    action_rate_reward_scale: float = -0.1
     
-    # penalizing joint effort
-    joint_effort_reward_scale: float = -1e-6
+    # JOINT EFFORT: 
+    # Since we normalized the torque to 0-1, we can use a normal number here.
+    # -0.5 means "Using 100% power on all joints costs -0.5 points per step"
+    # This is much safer than -1e-9.
+    joint_effort_reward_scale: float = -0.01
     
-    # being in a terminated state (collision)
-    terminated_reward_scale: float = -3.0
+    # TERMINATION: Strong penalty for crashing
+    terminated_reward_scale: float = -10.0
+    
+    # ORIENTATION: Reward for pointing straight down
+    # Start with 1.0. If it still tilts, increase to 2.0 or 5.0.
+    orientation_reward_scale: float = 1.0

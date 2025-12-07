@@ -51,24 +51,31 @@ RIGHT_ARM_BOT_CFG = ArticulationCfg(
         # Default joint velocities for all 10 joints.
         # Using a regex is common here.
         joint_vel={".*": 0.0},
-    ),  # <-- 5. This is now a comma
+    ), 
 
-    # 6. The 'actuators' block is now INSIDE the ArticulationCfg call
+    #'actuators' block is now INSIDE the ArticulationCfg call
     actuators={
-        "all_joints": ImplicitActuatorCfg(
-            # Use a regex to match all 10 joints.
-            joint_names_expr=["Joint_.*"], 
+        # 1. SPECIAL CONFIG: Joint_03_04
+        "heavy_lifter": ImplicitActuatorCfg(
+            joint_names_expr=["Joint_03_04"], 
             
-            # These are the *solver-level* caps.
-            # Max torque [N-m]
-            effort_limit_sim=5.0,  # Use effort_limit_sim [1]
-            # Max velocity [rad/s]
+            # drastically increased values to support weight
+            stiffness=10000.0,       # P-Gain: Holds the arm up (Try 200-500)
+            damping=500.0,          # D-Gain: Prevents it from bouncing
+            effort_limit_sim=100000.0, # Increased max torque limit
             velocity_limit_sim=1.0, 
-            
-            # These are the PD gains.
-            # P-gain: Needs tuning. Higher values = stiffer.
+        ),
+
+        # 2. STANDARD CONFIG: All other joints
+        "standard_joints": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "Joint_00_02", "Joint_02_03", 
+                "Joint_04_05", "Joint_05_06", "Joint_06_07", 
+                "Joint_07_08", "Joint_08_09", "Joint_09_10", "Joint_10_11"
+            ],
+            effort_limit_sim=10.0,
+            velocity_limit_sim=10.0, 
             stiffness=40.0,
-            # D-gain: Needs tuning. Higher values = more damping.
             damping=1.0,
         ),
     },

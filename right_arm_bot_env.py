@@ -12,7 +12,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.terrains import TerrainImporter
-
+from isaaclab.utils.math import quat_apply
 from .right_arm_bot_env_cfg import RightArmBotEnvCfg
 
 
@@ -25,12 +25,11 @@ class RightArmBotEnv(DirectRLEnv):
         """Initialize the environment."""
         # initialize the base class
         super().__init__(cfg, render_mode, **kwargs)
-
+        #print("MY JOINT ORDER:", self._robot.data.joint_names)
         # --- FIX: Auto-update Config Dimensions to match Robot ---
-        # This prevents the 'ValueError: mismatch' crash by accepting whatever the robot provides.
         action_dim = gym.spaces.flatdim(self.single_action_space)
         if self.cfg.action_space != action_dim:
-            print(f"[INFO] Action space mismatch. Updating config from {self.cfg.action_space} to {action_dim}")
+            #print(f"[INFO] Action space mismatch. Updating config from {self.cfg.action_space} to {action_dim}")
             self.cfg.action_space = action_dim
 
         obs_dim = gym.spaces.flatdim(self.single_observation_space)
@@ -75,11 +74,23 @@ class RightArmBotEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        """Actions applied to the robot before physics step."""
         self._actions = actions.clone()
-        # process actions: apply action scale and add to default joint positions
-        # Ensure we broadcast correctly if robot has more joints than actions
+        
+        # --- 1. Calculate Standard Targets ---
         targets = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
+
+        # --- 2. CLAMP JOINT_09_10 ---
+        PROBE_JOINT_IDX = 8
+        
+        # Define your allowed range in Radians
+        # Example: Allow it to wiggle slightly between 80 and 100 degrees
+        MIN_ANGLE = -1.0472  # ~50 degrees
+        MAX_ANGLE = -1.74533  # ~100 degrees
+        
+        # Clamp the value so it never exceeds these limits
+        targets[:, PROBE_JOINT_IDX] = torch.clamp(targets[:, PROBE_JOINT_IDX], min=MIN_ANGLE, max=MAX_ANGLE)
+
+        # --- 3. APPLY ---
         self._processed_actions = targets
 
     def _apply_action(self):
@@ -94,25 +105,58 @@ class RightArmBotEnv(DirectRLEnv):
         joint_pos_rel = self._robot.data.joint_pos - self._robot.data.default_joint_pos
         joint_vel = self._robot.data.joint_vel
         
+        ee_pos = self._robot.data.body_pos_w[:, -1, :]
+        # Calculate vector to target (Goal Position - Current Position)
+        target_vec = self.targets - ee_pos
         # Concatenate observations
-        obs = torch.cat([joint_pos_rel, joint_vel], dim=-1)
+        obs = torch.cat([joint_pos_rel, joint_vel, target_vec], dim=-1)
 
         observations = {"policy": obs}
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
         """Get rewards from the environment."""
-        ee_pos = self._robot.data.body_pos_w[:, -1, :] 
         
+        # --- 1. REACHING REWARD ---
+        ee_pos = self._robot.data.body_pos_w[:, -1, :] 
         distance = torch.norm(self.targets - ee_pos, dim=-1)
         
-        reward_reaching = -1.0 * distance * self.cfg.reaching_goal_reward_scale
+        # Sharper tolerance for scanning (0.15)
+        reward_reaching = torch.exp(-distance / 0.15) * self.cfg.reaching_goal_reward_scale
+        
+        # --- 2. ORIENTATION REWARD ---
+        # Get the quaternion orientation of the end-effector
+        ee_quat = self._robot.data.body_quat_w[:, -1, :]
+        
+        # Define the "Forward" direction of your probe in LOCAL space (X-axis)
+        probe_vec_local = torch.zeros((self.num_envs, 3), device=self.device)
+        probe_vec_local[:, 1] = -1.0 
+        
+        probe_vec_world = quat_apply(ee_quat, probe_vec_local)
+        
+        # Define the target "Down" vector in WORLD space (0, 0, -1)
+        target_vec_world = torch.zeros((self.num_envs, 3), device=self.device)
+        target_vec_world[:, 2] = -1.0 
+        
+        # Calculate Cosine Similarity (Dot Product)
+        dot_prod = torch.sum(probe_vec_world * target_vec_world, dim=-1)
+        
+        reward_orientation = dot_prod * self.cfg.orientation_reward_scale
+
+        # --- 3. PENALTIES ---
         reward_action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1) * self.cfg.action_rate_reward_scale
-        reward_effort = torch.sum(torch.square(self._robot.data.applied_torque), dim=1) * self.cfg.joint_effort_reward_scale
+
+        torques = self._robot.data.applied_torque
+        max_torque = 1000.0 
+        norm_torques = torques / max_torque
+        reward_effort = torch.sum(torch.square(norm_torques), dim=1) * self.cfg.joint_effort_reward_scale
+        
         reward_terminated = self.reset_terminated.float() * self.cfg.terminated_reward_scale
 
+        # --- LOGGING ---
         rewards = {
             "reaching_goal_reward_scale": reward_reaching,
+            "orientation_reward_scale": reward_orientation,
             "action_rate_reward_scale": reward_action_rate,
             "joint_effort_reward_scale": reward_effort,
             "terminated_reward_scale": reward_terminated,
@@ -120,7 +164,10 @@ class RightArmBotEnv(DirectRLEnv):
         
         total_reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
+        # Log episode sums
         for key, value in rewards.items():
+            if key not in self._episode_sums:
+                self._episode_sums[key] = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             self._episode_sums[key] += value
             
         return total_reward
@@ -143,9 +190,25 @@ class RightArmBotEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         
-        # Randomize targets
-        self.targets[env_ids] = torch.rand((len(env_ids), 3), device=self.device) * 1.0 - 0.5
-        self.targets[env_ids, 2] = torch.rand((len(env_ids)), device=self.device) * 0.5 + 0.1
+        # --- MODIFIED: ABDOMINAL SCAN TASK ---
+        # We define a "Patient Bed" relative to the robot base.
+        # X axis: Depth (how far in front of the robot)
+        # Y axis: Width (The horizontal scan direction)
+        # Z axis: Height (The height of the patient's belly)
+
+        num_resets = len(env_ids)
+        
+        # Fixed Depth (X): The patient is 0.2 meters in front of the robot
+        # We add tiny noise (+- 5cm) so it doesn't overfit to exactly 0.5000m
+        self.targets[env_ids, 0] = 0.2 + (torch.rand(num_resets, device=self.device) * 0.1 - 0.05)
+        
+        # Variable Width (Y): The Scan Line. 
+        # Randomly sample anywhere from -0.2m (left) to +0.2m (right)
+        self.targets[env_ids, 1] = (torch.rand(num_resets, device=self.device) * 0.6) - 0.4
+        
+        # Fixed Height (Z): The patient is lying down at 0.15m height
+        self.targets[env_ids, 2] = 0.15
+        # -------------------------------------
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
